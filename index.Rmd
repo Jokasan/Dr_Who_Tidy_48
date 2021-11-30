@@ -1,0 +1,166 @@
+---
+title: "Predicting IMDB rating for Dr. Who (tidytuesday week 48)"
+author: "Nils Indreiten"
+date: "Created: 29/11/2021"
+output:
+  rmdformats::downcute:
+    code_folding: show
+    self_contained: true
+    thumbnails: false
+    lightbox: true
+    downcute_theme: "chaos"
+pkgdown:
+  as_is: true
+---
+
+```{r setup, include=FALSE, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+pacman::p_load(tidyverse,tidymodels)
+load("episodes.rda")
+load("imdb.rda")
+load("Dr_Who_res.rda")
+```
+
+## Read in the Data
+
+These data are part of [week 48 of the tidytuesday
+series](https://github.com/rfordatascience/tidytuesday/blob/master/data/2021/2021-11-23/readme.md),
+it contains information about the Doctro Who TV program. This report was
+inspired by [Julia Silge](https://juliasilge.com/blog/doctor-who/) .Lets
+read in the data:
+
+```{r eval=FALSE}
+episodes <- readr::read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2021/2021-11-23/episodes.csv') # Episode data
+
+imdb <- readr::read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2021/2021-11-23/imdb.csv')
+```
+
+In order to have the imdb rating for each episdoe in every season, the
+two datasets need to be joined. This can be achieved using a right join:
+
+```{r}
+# rename columns to join b, prior to joining:
+episodes <- episodes %>% 
+  rename("ep_num"="episode_number",
+         "season"="season_number") 
+# perform a right join to combine the episode and imdb rating data:
+ep_imdb <- episodes %>% right_join(imdb, by=c("season", "ep_num")) 
+# take a look at the data:
+glimpse(ep_imdb)
+```
+
+Since the aim of this report is to predict IMDB score of Dr. Who
+episodes, it might be interesting to visualise how the IMDB ratings
+fluctuated over time:
+
+```{r}
+# some minor data cleaning first:
+ep_imdb <- ep_imdb %>% rename("rating"="rating.y") %>% select(season, ep_num, first_aired, uk_viewers, rating)
+
+# plot visualisation:
+ep_imdb %>% 
+  ggplot(aes(first_aired, rating))+
+  geom_line(alpha=0.8, color="indianred")+
+  xlab("")+
+  ylab("IMDB Rating")+
+  theme_minimal()
+```
+
+The fluctuations are quite spiky, indicating steep fluctuations in the
+ratings across seasons.
+
+## Define a Workflow
+
+First some bootstrap resampling folds for the episodes are created, then
+a workflow for predicting IMDB rating (out of 10) from a couple of
+scpeified variables:
+
+```{r, message=FALSE}
+set.seed(1080)
+folds <- bootstraps(ep_imdb, times = 1000, strata = rating)
+folds # take a quick look
+```
+
+We will be using the first_aired variable as one of the predictors,
+therefore, some feature engineering is required. In paticular a new date
+feature indicating the year in which the episdoe aired and another
+variable indicating holidays celebrated in the UK, will be created. The
+holiday date variable will give an indication of whether the Dr. Who
+episode was a New Year's special.
+
+```{r}
+# Define the recipe:
+Dr_Who_rec <- recipe(rating ~ first_aired + uk_viewers, data = ep_imdb) %>% 
+  step_date(first_aired, features= "year") %>% 
+   step_holiday(first_aired,
+    holidays = c("NewYearsDay"),
+    keep_original_cols = FALSE
+  )
+
+# Check hwo this will transform the data, by unhashing the line below:
+# prep(Dr_Who_rec) %>% bake(new_data= NULL)
+```
+
+Combine the recipe with a model, given the limitations in the data size,
+an OLS linear model will be used:
+
+```{r}
+Dr_Who_wf <- workflow(Dr_Who_rec, linear_reg())
+Dr_Who_wf
+```
+
+## Selecting Specified Quantities from Workflows
+
+We can extract the fitted model by using the ctrl_resamples function,
+from the control\_\* family of functions:
+
+```{r}
+ctrl_extract <- control_resamples(extract = extract_fit_engine)
+```
+
+This will allow us to keep the linear model from each fitted resample.
+
+```{r message=FALSE, warning=FALSE, eval=FALSE}
+doParallel::registerDoParallel()
+set.seed(1235)
+Dr_Who_res <- fit_resamples(Dr_Who_wf, folds, control =  ctrl_extract)
+Dr_Who_res 
+```
+
+The tidy() function can be applied to the lm object from each resample,
+allowing us to see the coefficients.
+
+```{r}
+Dr_Who_res %>%
+select(id, .extracts) %>%
+  unnest(.extracts) %>%
+  mutate(coefs = map(.extracts, tidy)) %>%
+  unnest(coefs) 
+```
+
+Finally we can visualise the coeeficients according to the predictor
+variables:
+
+```{r, warning=FALSE}
+Dr_Who_res %>%
+  select(id, .extracts) %>%
+  unnest(.extracts) %>%
+  mutate(coefs = map(.extracts, tidy)) %>%
+  unnest(coefs) %>%
+  filter(term != "(Intercept)") %>%
+  ggplot(aes(estimate, fill = term)) +
+  geom_histogram(alpha = 0.8, bins = 12, show.legend = FALSE) +
+  facet_wrap(vars(term), scales = "free")+
+  theme_minimal()
+```
+
+Its seems that episodes airing on New Years Day have a slightly lower
+rating (-1.25) than episodes airing on other days. Similarly there is a
+modest decrease in the rating over the years. In contrast there is
+evidence to suggest that the rating increases with viewership.
+
+## Session Info
+
+```{r echo=FALSE}
+sessionInfo()
+```
